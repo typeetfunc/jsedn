@@ -1,33 +1,108 @@
+
 ;(function(){
+
 /**
- * Require the given path.
+ * Require the module at `name`.
  *
- * @param {String} path
+ * @param {String} name
  * @return {Object} exports
  * @api public
  */
 
-function require(p, parent, orig){
-  var path = require.resolve(p)
-    , mod = require.modules[path];
+function require(name) {
+  var module = require.modules[name];
+  if (!module) throw new Error('failed to require "' + name + '"');
 
-  // lookup failed
-  if (null == path) {
-    orig = orig || p;
-    parent = parent || 'root';
-    throw new Error('failed to require "' + orig + '" from "' + parent + '"');
+  if (!('exports' in module) && typeof module.definition === 'function') {
+    module.client = module.component = true;
+    module.definition.call(this, module.exports = {}, module);
+    delete module.definition;
   }
 
-  // perform real require()
-  // by invoking the module's
-  // registered function
-  if (!mod.exports) {
-    mod.exports = {};
-    mod.client = mod.component = true;
-    mod.call(this, mod, mod.exports, require.relative(path));
-  }
+  return module.exports;
+}
 
-  return mod.exports;
+/**
+ * Meta info, accessible in the global scope unless you use AMD option.
+ */
+
+require.loader = 'component';
+
+/**
+ * Internal helper object, contains a sorting function for semantiv versioning
+ */
+require.helper = {};
+require.helper.semVerSort = function(a, b) {
+  var aArray = a.version.split('.');
+  var bArray = b.version.split('.');
+  for (var i=0; i<aArray.length; ++i) {
+    var aInt = parseInt(aArray[i], 10);
+    var bInt = parseInt(bArray[i], 10);
+    if (aInt === bInt) {
+      var aLex = aArray[i].substr((""+aInt).length);
+      var bLex = bArray[i].substr((""+bInt).length);
+      if (aLex === '' && bLex !== '') return 1;
+      if (aLex !== '' && bLex === '') return -1;
+      if (aLex !== '' && bLex !== '') return aLex > bLex ? 1 : -1;
+      continue;
+    } else if (aInt > bInt) {
+      return 1;
+    } else {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Find and require a module which name starts with the provided name.
+ * If multiple modules exists, the highest semver is used. 
+ * This function can only be used for remote dependencies.
+
+ * @param {String} name - module name: `user~repo`
+ * @param {Boolean} returnPath - returns the canonical require path if true, 
+ *                               otherwise it returns the epxorted module
+ */
+require.latest = function (name, returnPath) {
+  function showError(name) {
+    throw new Error('failed to find latest module of "' + name + '"');
+  }
+  // only remotes with semvers, ignore local files conataining a '/'
+  var versionRegexp = /(.*)~(.*)@v?(\d+\.\d+\.\d+[^\/]*)$/;
+  var remoteRegexp = /(.*)~(.*)/;
+  if (!remoteRegexp.test(name)) showError(name);
+  var moduleNames = Object.keys(require.modules);
+  var semVerCandidates = [];
+  var otherCandidates = []; // for instance: name of the git branch
+  for (var i=0; i<moduleNames.length; i++) {
+    var moduleName = moduleNames[i];
+    if (new RegExp(name + '@').test(moduleName)) {
+        var version = moduleName.substr(name.length+1);
+        var semVerMatch = versionRegexp.exec(moduleName);
+        if (semVerMatch != null) {
+          semVerCandidates.push({version: version, name: moduleName});
+        } else {
+          otherCandidates.push({version: version, name: moduleName});
+        } 
+    }
+  }
+  if (semVerCandidates.concat(otherCandidates).length === 0) {
+    showError(name);
+  }
+  if (semVerCandidates.length > 0) {
+    var module = semVerCandidates.sort(require.helper.semVerSort).pop().name;
+    if (returnPath === true) {
+      return module;
+    }
+    return require(module);
+  }
+  // if the build contains more than one branch of the same module
+  // you should not use this funciton
+  var module = otherCandidates.sort(function(a, b) {return a.name > b.name})[0].name;
+  if (returnPath === true) {
+    return module;
+  }
+  return require(module);
 }
 
 /**
@@ -37,161 +112,38 @@ function require(p, parent, orig){
 require.modules = {};
 
 /**
- * Registered aliases.
- */
-
-require.aliases = {};
-
-/**
- * Resolve `path`.
+ * Register module at `name` with callback `definition`.
  *
- * Lookup:
- *
- *   - PATH/index.js
- *   - PATH.js
- *   - PATH
- *
- * @param {String} path
- * @return {String} path or null
+ * @param {String} name
+ * @param {Function} definition
  * @api private
  */
 
-require.resolve = function(path){
-  var orig = path
-    , reg = path + '.js'
-    , regJSON = path + '.json'
-    , index = path + '/index.js'
-    , indexJSON = path + '/index.json';
-
-  return require.modules[reg] && reg
-    || require.modules[regJSON] && regJSON
-    || require.modules[index] && index
-    || require.modules[indexJSON] && indexJSON
-    || require.modules[orig] && orig
-    || require.aliases[index];
-};
-
-/**
- * Normalize `path` relative to the current path.
- *
- * @param {String} curr
- * @param {String} path
- * @return {String}
- * @api private
- */
-
-require.normalize = function(curr, path) {
-  var segs = [];
-
-  if ('.' != path.charAt(0)) return path;
-
-  curr = curr.split('/');
-  path = path.split('/');
-
-  for (var i = 0; i < path.length; ++i) {
-    if ('..' == path[i]) {
-      curr.pop();
-    } else if ('.' != path[i] && '' != path[i]) {
-      segs.push(path[i]);
-    }
-  }
-
-  return curr.concat(segs).join('/');
-};
-
-/**
- * Register module at `path` with callback `fn`.
- *
- * @param {String} path
- * @param {Function} fn
- * @api private
- */
-
-require.register = function(path, fn){
-  require.modules[path] = fn;
-};
-
-/**
- * Alias a module definition.
- *
- * @param {String} from
- * @param {String} to
- * @api private
- */
-
-require.alias = function(from, to){
-  var fn = require.modules[from];
-  if (!fn) throw new Error('failed to alias "' + from + '", it does not exist');
-  require.aliases[to] = from;
-};
-
-/**
- * Return a require function relative to the `parent` path.
- *
- * @param {String} parent
- * @return {Function}
- * @api private
- */
-
-require.relative = function(parent) {
-  var p = require.normalize(parent, '..');
-
-  /**
-   * lastIndexOf helper.
-   */
-
-  function lastIndexOf(arr, obj){
-    var i = arr.length;
-    while (i--) {
-      if (arr[i] === obj) return i;
-    }
-    return -1;
-  }
-
-  /**
-   * The relative require() itself.
-   */
-
-  function fn(path){
-    var orig = path;
-    path = fn.resolve(path);
-    return require(path, parent, orig);
-  }
-
-  /**
-   * Resolve relative to the parent.
-   */
-
-  fn.resolve = function(path){
-    // resolve deps by returning
-    // the dep in the nearest "deps"
-    // directory
-    if ('.' != path.charAt(0)) {
-      var segs = parent.split('/');
-      var i = lastIndexOf(segs, 'deps') + 1;
-      if (!i) i = 0;
-      path = segs.slice(0, i + 1).join('/') + '/deps/' + path;
-      return path;
-    }
-    return require.normalize(p, path);
+require.register = function (name, definition) {
+  require.modules[name] = {
+    definition: definition
   };
-
-  /**
-   * Check if module is defined at `path`.
-   */
-
-  fn.exists = function(path){
-    return !! require.modules[fn.resolve(path)];
-  };
-
-  return fn;
-};require.register("jkroso-type/index.js", function(module, exports, require){
+};
 
 /**
- * refs
+ * Define a module's exports immediately with `exports`.
+ *
+ * @param {String} name
+ * @param {Generic} exports
+ * @api private
  */
 
-var toString = Object.prototype.toString;
+require.define = function (name, exports) {
+  require.modules[name] = {
+    exports: exports
+  };
+};
+require.register("jkroso~type@1.1.0", function (exports, module) {
+
+var toString = {}.toString
+var DomNode = typeof window != 'undefined'
+  ? window.Node
+  : Function
 
 /**
  * Return the type of `val`.
@@ -201,14 +153,21 @@ var toString = Object.prototype.toString;
  * @api public
  */
 
-module.exports = function(v){
-  // .toString() is slow so try avoid it
-  return typeof v === 'object'
-    ? types[toString.call(v)]
-    : typeof v
-};
+module.exports = exports = function(x){
+  var type = typeof x
+  if (type != 'object') return type
+  type = types[toString.call(x)]
+  if (type) return type
+  if (x instanceof DomNode) switch (x.nodeType) {
+    case 1:  return 'element'
+    case 3:  return 'text-node'
+    case 9:  return 'document'
+    case 11: return 'document-fragment'
+    default: return 'dom-node'
+  }
+}
 
-var types = {
+var types = exports.types = {
   '[object Function]': 'function',
   '[object Date]': 'date',
   '[object RegExp]': 'regexp',
@@ -220,160 +179,145 @@ var types = {
   '[object Number]': 'number',
   '[object Boolean]': 'boolean',
   '[object Object]': 'object',
-  '[object Text]': 'textnode',
-  '[object Uint8Array]': '8bit-array',
-  '[object Uint16Array]': '16bit-array',
-  '[object Uint32Array]': '32bit-array',
-  '[object Uint8ClampedArray]': '8bit-array',
-  '[object Error]': 'error'
+  '[object Text]': 'text-node',
+  '[object Uint8Array]': 'bit-array',
+  '[object Uint16Array]': 'bit-array',
+  '[object Uint32Array]': 'bit-array',
+  '[object Uint8ClampedArray]': 'bit-array',
+  '[object Error]': 'error',
+  '[object FormData]': 'form-data',
+  '[object File]': 'file',
+  '[object Blob]': 'blob'
 }
-
-if (typeof window != 'undefined') {
-  for (var el in window) if (/^HTML\w+Element$/.test(el)) {
-    types['[object '+el+']'] = 'element'
-  }
-}
-
-module.exports.types = types
 
 });
-require.register("jkroso-equals/index.js", function(module, exports, require){
 
-var type = require('type')
-
-/**
- * assert all values are equal
- *
- * @param {Any} [...]
- * @return {Boolean}
- */
-
-module.exports = function(){
-	var i = arguments.length - 1
-	while (i > 0) {
-		if (!compare(arguments[i], arguments[--i])) return false
-	}
-	return true
-}
+require.register("jkroso~equals@1.0.1", function (exports, module) {
+var type = require('jkroso~type@1.1.0')
 
 // (any, any, [array]) -> boolean
-function compare(a, b, memos){
-	// All identical values are equivalent
-	if (a === b) return true
-	var fnA = types[type(a)]
-	if (fnA !== types[type(b)]) return false
-	return fnA ? fnA(a, b, memos) : false
+function equal(a, b, memos){
+  // All identical values are equivalent
+  if (a === b) return true
+  var fnA = types[type(a)]
+  var fnB = types[type(b)]
+  return fnA && fnA === fnB
+    ? fnA(a, b, memos)
+    : false
 }
 
 var types = {}
 
 // (Number) -> boolean
-types.number = function(a){
-	// NaN check
-	return a !== a
+types.number = function(a, b){
+  return a !== a && b !== b/*Nan check*/
 }
 
 // (function, function, array) -> boolean
 types['function'] = function(a, b, memos){
-	return a.toString() === b.toString()
-		// Functions can act as objects
-	  && types.object(a, b, memos) 
-		&& compare(a.prototype, b.prototype)
+  return a.toString() === b.toString()
+    // Functions can act as objects
+    && types.object(a, b, memos)
+    && equal(a.prototype, b.prototype)
 }
 
 // (date, date) -> boolean
 types.date = function(a, b){
-	return +a === +b
+  return +a === +b
 }
 
 // (regexp, regexp) -> boolean
 types.regexp = function(a, b){
-	return a.toString() === b.toString()
+  return a.toString() === b.toString()
 }
 
 // (DOMElement, DOMElement) -> boolean
 types.element = function(a, b){
-	return a.outerHTML === b.outerHTML
+  return a.outerHTML === b.outerHTML
 }
 
 // (textnode, textnode) -> boolean
 types.textnode = function(a, b){
-	return a.textContent === b.textContent
+  return a.textContent === b.textContent
 }
 
 // decorate `fn` to prevent it re-checking objects
 // (function) -> function
 function memoGaurd(fn){
-	return function(a, b, memos){
-		if (!memos) return fn(a, b, [])
-		var i = memos.length, memo
-		while (memo = memos[--i]) {
-			if (memo[0] === a && memo[1] === b) return true
-		}
-		return fn(a, b, memos)
-	}
+  return function(a, b, memos){
+    if (!memos) return fn(a, b, [])
+    var i = memos.length, memo
+    while (memo = memos[--i]) {
+      if (memo[0] === a && memo[1] === b) return true
+    }
+    return fn(a, b, memos)
+  }
 }
 
 types['arguments'] =
-types.array = memoGaurd(compareArrays)
+types['bit-array'] =
+types.array = memoGaurd(arrayEqual)
 
 // (array, array, array) -> boolean
-function compareArrays(a, b, memos){
-	var i = a.length
-	if (i !== b.length) return false
-	memos.push([a, b])
-	while (i--) {
-		if (!compare(a[i], b[i], memos)) return false
-	}
-	return true
+function arrayEqual(a, b, memos){
+  var i = a.length
+  if (i !== b.length) return false
+  memos.push([a, b])
+  while (i--) {
+    if (!equal(a[i], b[i], memos)) return false
+  }
+  return true
 }
 
-types.object = memoGaurd(compareObjects)
+types.object = memoGaurd(objectEqual)
 
 // (object, object, array) -> boolean
-function compareObjects(a, b, memos) {
-	var ka = getEnumerableProperties(a)
-	var kb = getEnumerableProperties(b)
-	var i = ka.length
+function objectEqual(a, b, memos) {
+  if (typeof a.equal == 'function') {
+    memos.push([a, b])
+    return a.equal(b, memos)
+  }
+  var ka = getEnumerableProperties(a)
+  var kb = getEnumerableProperties(b)
+  var i = ka.length
 
-	// same number of properties
-	if (i !== kb.length) return false
+  // same number of properties
+  if (i !== kb.length) return false
 
-	// although not necessarily the same order
-	ka.sort()
-	kb.sort()
+  // although not necessarily the same order
+  ka.sort()
+  kb.sort()
 
-	// cheap key test
-	while (i--) if (ka[i] !== kb[i]) return false
+  // cheap key test
+  while (i--) if (ka[i] !== kb[i]) return false
 
-	// remember
-	memos.push([a, b])
+  // remember
+  memos.push([a, b])
 
-	// iterate again this time doing a thorough check
-	i = ka.length
-	while (i--) {
-		var key = ka[i]
-		if (!compare(a[key], b[key], memos)) return false
-	}
+  // iterate again this time doing a thorough check
+  i = ka.length
+  while (i--) {
+    var key = ka[i]
+    if (!equal(a[key], b[key], memos)) return false
+  }
 
-	return true
+  return true
 }
 
 // (object) -> array
 function getEnumerableProperties (object) {
-	var result = []
-	for (var k in object) if (k !== 'constructor') {
-		result.push(k)
-	}
-	return result
+  var result = []
+  for (var k in object) if (k !== 'constructor') {
+    result.push(k)
+  }
+  return result
 }
 
-// expose compare
-module.exports.compare = compare
+module.exports = equal
 
 });
-require.register("component-type/index.js", function(module, exports, require){
 
+require.register("component~type@v1.2.1", function (exports, module) {
 /**
  * toString ref.
  */
@@ -390,54 +334,70 @@ var toString = Object.prototype.toString;
 
 module.exports = function(val){
   switch (toString.call(val)) {
-    case '[object Function]': return 'function';
     case '[object Date]': return 'date';
     case '[object RegExp]': return 'regexp';
     case '[object Arguments]': return 'arguments';
     case '[object Array]': return 'array';
-    case '[object String]': return 'string';
+    case '[object Error]': return 'error';
   }
 
   if (val === null) return 'null';
   if (val === undefined) return 'undefined';
+  if (val !== val) return 'nan';
   if (val && val.nodeType === 1) return 'element';
-  if (val === Object(val)) return 'object';
+
+  if (isBuffer(val)) return 'buffer';
+
+  val = val.valueOf
+    ? val.valueOf()
+    : Object.prototype.valueOf.apply(val);
 
   return typeof val;
 };
 
+// code borrowed from https://github.com/feross/is-buffer/blob/master/index.js
+function isBuffer(obj) {
+  return !!(obj != null &&
+    (obj._isBuffer || // For Safari 5-7 (missing Object.prototype.constructor)
+      (obj.constructor &&
+      typeof obj.constructor.isBuffer === 'function' &&
+      obj.constructor.isBuffer(obj))
+    ))
+}
+
 });
-require.register("jsedn/index.js", function(module, exports, require){
-module.exports = require("./lib/reader.js");
+
+require.register("jsedn", function (exports, module) {
+module.exports = require("jsedn/lib/reader.js");
 });
-require.register("jsedn/lib/atoms.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/atoms.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var BigInt, Char, Discard, Keyword, Prim, StringObj, Symbol, bigInt, char, charMap, kw, memo, sym, type,
-    __hasProp = {}.hasOwnProperty,
-    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
-    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
-    __slice = [].slice;
+    extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+    hasProp = {}.hasOwnProperty,
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
+    slice = [].slice;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  memo = require("./memo");
+  memo = require("jsedn/lib/memo.js");
 
   Prim = (function() {
-
     function Prim(val) {
       var x;
       if (type(val) === "array") {
         this.val = (function() {
-          var _i, _len, _results;
-          _results = [];
-          for (_i = 0, _len = val.length; _i < _len; _i++) {
-            x = val[_i];
+          var i, len, results;
+          results = [];
+          for (i = 0, len = val.length; i < len; i++) {
+            x = val[i];
             if (!(x instanceof Discard)) {
-              _results.push(x);
+              results.push(x);
             }
           }
-          return _results;
+          return results;
         })();
       } else {
         this.val = val;
@@ -456,9 +416,8 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 
   })();
 
-  BigInt = (function(_super) {
-
-    __extends(BigInt, _super);
+  BigInt = (function(superClass) {
+    extend(BigInt, superClass);
 
     function BigInt() {
       return BigInt.__super__.constructor.apply(this, arguments);
@@ -482,9 +441,8 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 
   })(Prim);
 
-  StringObj = (function(_super) {
-
-    __extends(StringObj, _super);
+  StringObj = (function(superClass) {
+    extend(StringObj, superClass);
 
     function StringObj() {
       return StringObj.__super__.constructor.apply(this, arguments);
@@ -510,9 +468,8 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
     formfeed: "\f"
   };
 
-  Char = (function(_super) {
-
-    __extends(Char, _super);
+  Char = (function(superClass) {
+    extend(Char, superClass);
 
     Char.prototype.ednEncode = function() {
       return "\\" + this.val;
@@ -541,32 +498,30 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
   })(StringObj);
 
   Discard = (function() {
-
     function Discard() {}
 
     return Discard;
 
   })();
 
-  Symbol = (function(_super) {
+  Symbol = (function(superClass) {
+    extend(Symbol, superClass);
 
-    __extends(Symbol, _super);
-
-    Symbol.prototype.validRegex = /[0-9A-Za-z.*+!\-_?$%&=:#/]+/;
+    Symbol.prototype.validRegex = /[0-9A-Za-z.*+!\-_?$%&=:#><\/]+/;
 
     Symbol.prototype.invalidFirstChars = [":", "#", "/"];
 
     Symbol.prototype.valid = function(word) {
-      var _ref, _ref1, _ref2;
-      if (((_ref = word.match(this.validRegex)) != null ? _ref[0] : void 0) !== word) {
+      var ref, ref1, ref2;
+      if (((ref = word.match(this.validRegex)) != null ? ref[0] : void 0) !== word) {
         throw "provided an invalid symbol " + word;
       }
       if (word.length === 1 && word[0] !== "/") {
-        if (_ref1 = word[0], __indexOf.call(this.invalidFirstChars, _ref1) >= 0) {
+        if (ref1 = word[0], indexOf.call(this.invalidFirstChars, ref1) >= 0) {
           throw "Invalid first character in symbol " + word[0];
         }
       }
-      if (((_ref2 = word[0]) === "-" || _ref2 === "+" || _ref2 === ".") && (word[1] != null) && word[1].match(/[0-9]/)) {
+      if (((ref2 = word[0]) === "-" || ref2 === "+" || ref2 === ".") && (word[1] != null) && word[1].match(/[0-9]/)) {
         throw "If first char is " + word[0] + " the second char can not be numeric. You had " + word[1];
       }
       if (word[0].match(/[0-9]/)) {
@@ -577,7 +532,7 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 
     function Symbol() {
       var args, parts;
-      args = 1 <= arguments.length ? __slice.call(arguments, 0) : [];
+      args = 1 <= arguments.length ? slice.call(arguments, 0) : [];
       switch (args.length) {
         case 1:
           if (args[0] === "/") {
@@ -615,7 +570,7 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
       if (this.name.length === 0) {
         throw "Symbol can not be empty";
       }
-      this.val = "" + (this.ns ? "" + this.ns + "/" : "") + this.name;
+      this.val = "" + (this.ns ? this.ns + "/" : "") + this.name;
       this.valid(this.val);
     }
 
@@ -641,9 +596,8 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 
   })(Prim);
 
-  Keyword = (function(_super) {
-
-    __extends(Keyword, _super);
+  Keyword = (function(superClass) {
+    extend(Keyword, superClass);
 
     Keyword.prototype.invalidFirstChars = ["#", "/"];
 
@@ -692,19 +646,20 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/atPath.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/atPath.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var kw;
 
-  kw = require("./atoms").kw;
+  kw = require("jsedn/lib/atoms.js").kw;
 
   module.exports = function(obj, path) {
-    var part, value, _i, _len;
+    var i, len, part, value;
     path = path.trim().replace(/[ ]{2,}/g, ' ').split(' ');
     value = obj;
-    for (_i = 0, _len = path.length; _i < _len; _i++) {
-      part = path[_i];
+    for (i = 0, len = path.length; i < len; i++) {
+      part = path[i];
       if (part[0] === ":") {
         part = kw(part);
       }
@@ -724,25 +679,25 @@ require.register("jsedn/lib/atPath.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/collections.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/collections.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var Iterable, List, Map, Pair, Prim, Set, Vector, encode, equals, type,
-    __hasProp = {}.hasOwnProperty,
-    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
-    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
+    extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+    hasProp = {}.hasOwnProperty,
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  equals = require("equals");
+  equals = require("jkroso~equals@1.0.1");
 
-  Prim = require("./atoms").Prim;
+  Prim = require("jsedn/lib/atoms.js").Prim;
 
-  encode = require("./encode").encode;
+  encode = require("jsedn/lib/encode.js").encode;
 
-  Iterable = (function(_super) {
-
-    __extends(Iterable, _super);
+  Iterable = (function(superClass) {
+    extend(Iterable, superClass);
 
     function Iterable() {
       return Iterable.__super__.constructor.apply(this, arguments);
@@ -783,14 +738,14 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     };
 
     Iterable.prototype.each = function(iter) {
-      var i, _i, _len, _ref, _results;
-      _ref = this.val;
-      _results = [];
-      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-        i = _ref[_i];
-        _results.push(iter(i));
+      var i, j, len, ref, results;
+      ref = this.val;
+      results = [];
+      for (j = 0, len = ref.length; j < len; j++) {
+        i = ref[j];
+        results.push(iter(i));
       }
-      return _results;
+      return results;
     };
 
     Iterable.prototype.map = function(iter) {
@@ -822,9 +777,8 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
 
   })(Prim);
 
-  List = (function(_super) {
-
-    __extends(List, _super);
+  List = (function(superClass) {
+    extend(List, superClass);
 
     function List() {
       return List.__super__.constructor.apply(this, arguments);
@@ -848,9 +802,8 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
 
   })(Iterable);
 
-  Vector = (function(_super) {
-
-    __extends(Vector, _super);
+  Vector = (function(superClass) {
+    extend(Vector, superClass);
 
     function Vector() {
       return Vector.__super__.constructor.apply(this, arguments);
@@ -874,9 +827,8 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
 
   })(Iterable);
 
-  Set = (function(_super) {
-
-    __extends(Set, _super);
+  Set = (function(superClass) {
+    extend(Set, superClass);
 
     Set.prototype.ednEncode = function() {
       return "\#{" + (Set.__super__.ednEncode.call(this)) + "}";
@@ -889,12 +841,12 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     };
 
     function Set(val) {
-      var item, _i, _len;
+      var item, j, len;
       Set.__super__.constructor.call(this);
       this.val = [];
-      for (_i = 0, _len = val.length; _i < _len; _i++) {
-        item = val[_i];
-        if (__indexOf.call(this.val, item) >= 0) {
+      for (j = 0, len = val.length; j < len; j++) {
+        item = val[j];
+        if (indexOf.call(this.val, item) >= 0) {
           throw "set not distinct";
         } else {
           this.val.push(item);
@@ -911,10 +863,9 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
   })(Iterable);
 
   Pair = (function() {
-
-    function Pair(key, val) {
-      this.key = key;
-      this.val = val;
+    function Pair(key1, val1) {
+      this.key = key1;
+      this.val = val1;
     }
 
     return Pair;
@@ -922,7 +873,6 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
   })();
 
   Map = (function() {
-
     Map.prototype.hashId = function() {
       return this.ednEncode();
     };
@@ -930,14 +880,14 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     Map.prototype.ednEncode = function() {
       var i;
       return "{" + (((function() {
-        var _i, _len, _ref, _results;
-        _ref = this.value();
-        _results = [];
-        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-          i = _ref[_i];
-          _results.push(encode(i));
+        var j, len, ref, results;
+        ref = this.value();
+        results = [];
+        for (j = 0, len = ref.length; j < len; j++) {
+          i = ref[j];
+          results.push(encode(i));
         }
-        return _results;
+        return results;
       }).call(this)).join(" ")) + "}";
     };
 
@@ -945,41 +895,41 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
       var i;
       return {
         Map: (function() {
-          var _i, _len, _ref, _results;
-          _ref = this.value();
-          _results = [];
-          for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-            i = _ref[_i];
-            _results.push(i.jsonEncode != null ? i.jsonEncode() : i);
+          var j, len, ref, results;
+          ref = this.value();
+          results = [];
+          for (j = 0, len = ref.length; j < len; j++) {
+            i = ref[j];
+            results.push(i.jsonEncode != null ? i.jsonEncode() : i);
           }
-          return _results;
+          return results;
         }).call(this)
       };
     };
 
     Map.prototype.jsEncode = function() {
-      var hashId, i, k, result, _i, _len, _ref, _ref1;
+      var hashId, i, j, k, len, ref, ref1, result;
       result = {};
-      _ref = this.keys;
-      for (i = _i = 0, _len = _ref.length; _i < _len; i = ++_i) {
-        k = _ref[i];
+      ref = this.keys;
+      for (i = j = 0, len = ref.length; j < len; i = ++j) {
+        k = ref[i];
         hashId = (k != null ? k.hashId : void 0) != null ? k.hashId() : k;
-        result[hashId] = ((_ref1 = this.vals[i]) != null ? _ref1.jsEncode : void 0) != null ? this.vals[i].jsEncode() : this.vals[i];
+        result[hashId] = ((ref1 = this.vals[i]) != null ? ref1.jsEncode : void 0) != null ? this.vals[i].jsEncode() : this.vals[i];
       }
       return result;
     };
 
-    function Map(val) {
-      var i, v, _i, _len, _ref;
-      this.val = val != null ? val : [];
+    function Map(val1) {
+      var i, j, len, ref, v;
+      this.val = val1 != null ? val1 : [];
       if (this.val.length && this.val.length % 2 !== 0) {
         throw "Map accepts an array with an even number of items. You provided " + this.val.length + " items";
       }
       this.keys = [];
       this.vals = [];
-      _ref = this.val;
-      for (i = _i = 0, _len = _ref.length; _i < _len; i = ++_i) {
-        v = _ref[i];
+      ref = this.val;
+      for (i = j = 0, len = ref.length; j < len; i = ++j) {
+        v = ref[i];
         if (i % 2 === 0) {
           this.keys.push(v);
         } else {
@@ -990,11 +940,11 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     }
 
     Map.prototype.value = function() {
-      var i, result, v, _i, _len, _ref;
+      var i, j, len, ref, result, v;
       result = [];
-      _ref = this.keys;
-      for (i = _i = 0, _len = _ref.length; _i < _len; i = ++_i) {
-        v = _ref[i];
+      ref = this.keys;
+      for (i = j = 0, len = ref.length; j < len; i = ++j) {
+        v = ref[i];
         result.push(v);
         if (this.vals[i] !== void 0) {
           result.push(this.vals[i]);
@@ -1004,10 +954,10 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     };
 
     Map.prototype.indexOf = function(key) {
-      var i, k, _i, _len, _ref;
-      _ref = this.keys;
-      for (i = _i = 0, _len = _ref.length; _i < _len; i = ++_i) {
-        k = _ref[i];
+      var i, j, k, len, ref;
+      ref = this.keys;
+      for (i = j = 0, len = ref.length; j < len; i = ++j) {
+        k = ref[i];
         if (equals(k, key)) {
           return i;
         }
@@ -1040,24 +990,24 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     };
 
     Map.prototype.each = function(iter) {
-      var k, _i, _len, _ref, _results;
-      _ref = this.keys;
-      _results = [];
-      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-        k = _ref[_i];
-        _results.push(iter(this.at(k), k));
+      var j, k, len, ref, results;
+      ref = this.keys;
+      results = [];
+      for (j = 0, len = ref.length; j < len; j++) {
+        k = ref[j];
+        results.push(iter(this.at(k), k));
       }
-      return _results;
+      return results;
     };
 
     Map.prototype.map = function(iter) {
       var result;
       result = new Map;
       this.each(function(v, k) {
-        var nv, _ref;
+        var nv, ref;
         nv = iter(v, k);
         if (nv instanceof Pair) {
-          _ref = [nv.key, nv.val], k = _ref[0], nv = _ref[1];
+          ref = [nv.key, nv.val], k = ref[0], nv = ref[1];
         }
         return result.set(k, nv);
       });
@@ -1090,10 +1040,10 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/compile.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
-(function() {
 
+require.register("jsedn/lib/compile.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
+(function() {
   module.exports = function(string) {
     return "return require('jsedn').parse(\"" + (string.replace(/"/g, '\\"').replace(/\n/g, " ").trim()) + "\")";
   };
@@ -1101,14 +1051,15 @@ require.register("jsedn/lib/compile.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/encode.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/encode.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var encode, encodeHandlers, encodeJson, tokenHandlers, type;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  tokenHandlers = require("./tokens").tokenHandlers;
+  tokenHandlers = require("jsedn/lib/tokens.js").tokenHandlers;
 
   encodeHandlers = {
     array: {
@@ -1118,13 +1069,13 @@ require.register("jsedn/lib/encode.js", function(module, exports, require){
       action: function(obj) {
         var v;
         return "[" + (((function() {
-          var _i, _len, _results;
-          _results = [];
-          for (_i = 0, _len = obj.length; _i < _len; _i++) {
-            v = obj[_i];
-            _results.push(encode(v));
+          var i, len, results;
+          results = [];
+          for (i = 0, len = obj.length; i < len; i++) {
+            v = obj[i];
+            results.push(encode(v));
           }
-          return _results;
+          return results;
         })()).join(" ")) + "]";
       }
     },
@@ -1231,8 +1182,9 @@ require.register("jsedn/lib/encode.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/memo.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/memo.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var memo;
 
@@ -1249,23 +1201,24 @@ require.register("jsedn/lib/memo.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/reader.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/reader.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
-  var BigInt, Char, Discard, Iterable, Keyword, List, Map, Pair, Prim, Set, StringObj, Symbol, Tag, Tagged, Vector, bigInt, char, encode, encodeHandlers, encodeJson, escapeChar, fs, handleToken, kw, lex, parenTypes, parens, parse, read, specialChars, sym, tagActions, tokenHandlers, type, typeClasses, _ref, _ref1, _ref2, _ref3, _ref4,
-    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
+  var BigInt, Char, Discard, Iterable, Keyword, List, Map, Pair, Prim, Set, StringObj, Symbol, Tag, Tagged, Vector, bigInt, char, encode, encodeHandlers, encodeJson, escapeChar, fs, handleToken, kw, lex, parenTypes, parens, parse, read, ref, ref1, ref2, ref3, ref4, specialChars, sym, tagActions, tokenHandlers, type, typeClasses,
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  _ref = require("./atoms"), Prim = _ref.Prim, Symbol = _ref.Symbol, Keyword = _ref.Keyword, StringObj = _ref.StringObj, Char = _ref.Char, Discard = _ref.Discard, BigInt = _ref.BigInt, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
+  ref = require("jsedn/lib/atoms.js"), Prim = ref.Prim, Symbol = ref.Symbol, Keyword = ref.Keyword, StringObj = ref.StringObj, Char = ref.Char, Discard = ref.Discard, BigInt = ref.BigInt, char = ref.char, kw = ref.kw, sym = ref.sym, bigInt = ref.bigInt;
 
-  _ref1 = require("./collections"), Iterable = _ref1.Iterable, List = _ref1.List, Vector = _ref1.Vector, Set = _ref1.Set, Pair = _ref1.Pair, Map = _ref1.Map;
+  ref1 = require("jsedn/lib/collections.js"), Iterable = ref1.Iterable, List = ref1.List, Vector = ref1.Vector, Set = ref1.Set, Pair = ref1.Pair, Map = ref1.Map;
 
-  _ref2 = require("./tags"), Tag = _ref2.Tag, Tagged = _ref2.Tagged, tagActions = _ref2.tagActions;
+  ref2 = require("jsedn/lib/tags.js"), Tag = ref2.Tag, Tagged = ref2.Tagged, tagActions = ref2.tagActions;
 
-  _ref3 = require("./encode"), encodeHandlers = _ref3.encodeHandlers, encode = _ref3.encode, encodeJson = _ref3.encodeJson;
+  ref3 = require("jsedn/lib/encode.js"), encodeHandlers = ref3.encodeHandlers, encode = ref3.encode, encodeJson = ref3.encodeJson;
 
-  _ref4 = require("./tokens"), handleToken = _ref4.handleToken, tokenHandlers = _ref4.tokenHandlers;
+  ref4 = require("jsedn/lib/tokens.js"), handleToken = ref4.handleToken, tokenHandlers = ref4.tokenHandlers;
 
   typeClasses = {
     Map: Map,
@@ -1300,13 +1253,13 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
   };
 
   lex = function(string) {
-    var c, escaping, in_comment, in_string, line, lines, list, token, _i, _len;
+    var c, escaping, i, in_comment, in_string, len, line, lines, list, token;
     list = [];
     lines = [];
     line = 1;
     token = '';
-    for (_i = 0, _len = string.length; _i < _len; _i++) {
-      c = string[_i];
+    for (i = 0, len = string.length; i < len; i++) {
+      c = string[i];
       if (c === "\n" || c === "\r") {
         line++;
       }
@@ -1346,13 +1299,13 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
           }
         }
         in_string += c;
-      } else if (__indexOf.call(specialChars, c) >= 0 && (escaping == null)) {
+      } else if (indexOf.call(specialChars, c) >= 0 && (escaping == null)) {
         if (token) {
           list.push(token);
           lines.push(line);
           token = '';
         }
-        if (__indexOf.call(parens, c) >= 0) {
+        if (indexOf.call(parens, c) >= 0) {
           list.push(c);
           lines.push(line);
         }
@@ -1409,7 +1362,7 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
             L.push(read_ahead(token, tokenIndex));
           }
         }
-      } else if (__indexOf.call(")]}", token) >= 0) {
+      } else if (indexOf.call(")]}", token) >= 0) {
         throw "unexpected " + token + " at line " + tokenLines[tokenIndex];
       } else {
         handledToken = handleToken(token);
@@ -1518,9 +1471,9 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
         return obj;
       }
     },
-    atPath: require("./atPath"),
-    unify: require("./unify")(parse),
-    compile: require("./compile")
+    atPath: require("jsedn/lib/atPath.js"),
+    unify: require("jsedn/lib/unify.js")(parse),
+    compile: require("jsedn/lib/compile.js")
   };
 
   if (typeof window === "undefined") {
@@ -1541,27 +1494,27 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/tags.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/tags.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
   var Prim, Tag, Tagged, tagActions, type,
-    __slice = [].slice,
-    __hasProp = {}.hasOwnProperty,
-    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
+    slice = [].slice,
+    extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+    hasProp = {}.hasOwnProperty;
 
-  Prim = require("./atoms").Prim;
+  Prim = require("jsedn/lib/atoms.js").Prim;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
   Tag = (function() {
-
     function Tag() {
-      var name, namespace, _ref;
-      namespace = arguments[0], name = 2 <= arguments.length ? __slice.call(arguments, 1) : [];
+      var name, namespace, ref;
+      namespace = arguments[0], name = 2 <= arguments.length ? slice.call(arguments, 1) : [];
       this.namespace = namespace;
       this.name = name;
       if (arguments.length === 1) {
-        _ref = arguments[0].split('/'), this.namespace = _ref[0], this.name = 2 <= _ref.length ? __slice.call(_ref, 1) : [];
+        ref = arguments[0].split('/'), this.namespace = ref[0], this.name = 2 <= ref.length ? slice.call(ref, 1) : [];
       }
     }
 
@@ -1577,9 +1530,8 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
 
   })();
 
-  Tagged = (function(_super) {
-
-    __extends(Tagged, _super);
+  Tagged = (function(superClass) {
+    extend(Tagged, superClass);
 
     function Tagged(_tag, _obj) {
       this._tag = _tag;
@@ -1594,7 +1546,7 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
     };
 
     Tagged.prototype.ednEncode = function() {
-      return "\#" + (this.tag().dn()) + " " + (require("./encode").encode(this.obj()));
+      return "\#" + (this.tag().dn()) + " " + (require("jsedn/lib/encode.js").encode(this.obj()));
     };
 
     Tagged.prototype.jsonEncode = function() {
@@ -1643,14 +1595,15 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/tokens.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/tokens.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
-  var Char, StringObj, Tag, bigInt, char, handleToken, kw, sym, tokenHandlers, _ref;
+  var Char, StringObj, Tag, bigInt, char, handleToken, kw, ref, sym, tokenHandlers;
 
-  _ref = require("./atoms"), Char = _ref.Char, StringObj = _ref.StringObj, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
+  ref = require("jsedn/lib/atoms.js"), Char = ref.Char, StringObj = ref.StringObj, char = ref.char, kw = ref.kw, sym = ref.sym, bigInt = ref.bigInt;
 
-  Tag = require("./tags").Tag;
+  Tag = require("jsedn/lib/tags.js").Tag;
 
   handleToken = function(token) {
     var handler, name;
@@ -1722,25 +1675,26 @@ require.register("jsedn/lib/tokens.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/type.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
-(function() {
 
-  module.exports = typeof window === "undefined" ? require("type-component") : require("type");
+require.register("jsedn/lib/type.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
+(function() {
+  module.exports = typeof window === "undefined" ? require("type-component") : require("component~type@v1.2.1");
 
 }).call(this);
 
 });
-require.register("jsedn/lib/unify.js", function(module, exports, require){
-// Generated by CoffeeScript 1.6.1
+
+require.register("jsedn/lib/unify.js", function (exports, module) {
+// Generated by CoffeeScript 1.10.0
 (function() {
-  var Map, Pair, Symbol, kw, sym, type, _ref, _ref1;
+  var Map, Pair, Symbol, kw, ref, ref1, sym, type;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  _ref = require("./collections"), Map = _ref.Map, Pair = _ref.Pair;
+  ref = require("jsedn/lib/collections.js"), Map = ref.Map, Pair = ref.Pair;
 
-  _ref1 = require("./atoms"), Symbol = _ref1.Symbol, kw = _ref1.kw, sym = _ref1.sym;
+  ref1 = require("jsedn/lib/atoms.js"), Symbol = ref1.Symbol, kw = ref1.kw, sym = ref1.sym;
 
   module.exports = function(parse) {
     return function(data, values, tokenStart) {
@@ -1788,13 +1742,12 @@ require.register("jsedn/lib/unify.js", function(module, exports, require){
 }).call(this);
 
 });
-require.alias("jkroso-equals/index.js", "jsedn/deps/equals/index.js");
-require.alias("jkroso-type/index.js", "jkroso-equals/deps/type/index.js");
 
-require.alias("component-type/index.js", "jsedn/deps/type/index.js");
-  if ("undefined" == typeof module) {
-    window.jsedn = require("jsedn");
-  } else {
-    module.exports = require("jsedn");
-  }
-})();
+if (typeof exports == "object") {
+  module.exports = require("jsedn");
+} else if (typeof define == "function" && define.amd) {
+  define("jsedn", [], function(){ return require("jsedn"); });
+} else {
+  (this || window)["jsedn"] = require("jsedn");
+}
+})()
